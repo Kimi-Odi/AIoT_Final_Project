@@ -53,17 +53,17 @@ def synthesize_speech(text: str) -> bytes:
         st.error(f"TTS 錯誤：{e}")
         return None
 
-def speech_to_text(file) -> str:
-    try:
-        resp = client.audio.transcriptions.create(
-            model="whisper-1",
-            file=file,
-            response_format="verbose_json"  # ⭐ 取得每段 timestamps
-        )
-        return resp.text
-    except Exception as e:
-        st.error(f"Whisper 錯誤：{e}")
-        return ""
+def speech_to_text(file):
+    """
+    Whisper 語音辨識（回傳 Python dict）
+    """
+    resp = client.audio.transcriptions.create(
+        model="whisper-1",
+        file=file,
+        response_format="verbose_json",  # 🔥 必須要有：取得 segments/time stamps
+    )
+    return resp.model_dump()  # 🔥 把 Transcription 物件轉成 dict
+
 
 FILLERS = ["嗯", "呃", "那個", "就是", "你知道", "like", "you know", "um", "uh"]
 
@@ -447,6 +447,7 @@ else:
         with st.spinner("Whisper 正在辨識你的語音…"):
             whisper_resp = speech_to_text(audio_rec)
             voice_answer = whisper_resp["text"]
+            segments = whisper_resp["segments"]
 
             # ===== 語音特徵分析 =====
             analysis = analyze_speech_features(whisper_resp, audio_rec.getvalue())
