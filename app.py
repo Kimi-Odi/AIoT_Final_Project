@@ -7,6 +7,7 @@ from datetime import datetime
 from dotenv import load_dotenv
 from openai import OpenAI
 import streamlit as st
+import librosa
 
 # 自訂模組
 from resume_parser import parse_resume
@@ -57,11 +58,65 @@ def speech_to_text(file) -> str:
         resp = client.audio.transcriptions.create(
             model="whisper-1",
             file=file,
+            response_format="verbose_json"  # ⭐ 取得每段 timestamps
         )
         return resp.text
     except Exception as e:
         st.error(f"Whisper 錯誤：{e}")
         return ""
+
+FILLERS = ["嗯", "呃", "那個", "就是", "你知道", "like", "you know", "um", "uh"]
+
+def analyze_speech_features(whisper_resp, audio_bytes):
+    result = {}
+
+    # ======================
+    # 1) 語速 WPM
+    # ======================
+    total_words = len(whisper_resp["text"].split())
+    total_time = whisper_resp["segments"][-1]["end"] - whisper_resp["segments"][0]["start"]
+    wpm = (total_words / total_time) * 60 if total_time > 0 else 0
+    result["wpm"] = round(wpm, 2)
+
+    # ======================
+    # 2) 停頓比例（silence ratio）
+    # ======================
+    silences = []
+    segs = whisper_resp["segments"]
+    for i in range(1, len(segs)):
+        gap = segs[i]["start"] - segs[i-1]["end"]
+        if gap > 0.2:   # >0.2s 視為停頓
+            silences.append(gap)
+
+    total_silence = sum(silences)
+    result["silence_ratio"] = round(total_silence / total_time, 3)
+
+    # ======================
+    # 3) 音量穩定度（Volume Stability）
+    # ======================
+    # 讀取音訊為 numpy 陣列
+    import soundfile as sf
+    import io
+    y, sr = sf.read(io.BytesIO(audio_bytes))
+
+    frame = librosa.feature.rms(y=y)[0]  # Root Mean Square energy
+    vol_std = np.std(frame)
+    vol_mean = np.mean(frame)
+    stability = 1 - (vol_std / (vol_mean + 1e-9))
+    result["volume_stability"] = round(float(stability), 3)
+
+    # ======================
+    # 4) 填充詞比例 filler ratio
+    # ======================
+    filler_count = 0
+    for f in FILLERS:
+        filler_count += whisper_resp["text"].count(f)
+
+    filler_ratio = filler_count / max(total_words, 1)
+    result["filler_ratio"] = round(filler_ratio, 3)
+
+    return result
+
 
 # ====== RAG ======
 class SimpleRAG:
@@ -109,6 +164,8 @@ init_state("last_question", None)
 init_state("grade_result", None)
 init_state("selected_history_interview_id", None)
 init_state("voice_mode", False)
+init_state("play_tts_first_question", False)
+
 
 # ====== Sidebar ======
 with st.sidebar:
@@ -337,6 +394,14 @@ def call_llm(job: str, style: str, history, resume_info=None):
 # --------------------------------------------------------
 for role, content in st.session_state.messages:
     st.chat_message(role).markdown(content)
+    # ===== 第一題 TTS 播放 =====
+    if st.session_state.get("play_tts_first_question", False):
+        st.session_state.play_tts_first_question = False  # 播一次就關掉
+        first_question = st.session_state.last_question
+        audio_bytes = synthesize_speech(first_question)
+        if audio_bytes:
+            st.audio(audio_bytes, format="audio/mp3")
+
 
 
 # --------------------------------------------------------
@@ -344,24 +409,24 @@ for role, content in st.session_state.messages:
 # --------------------------------------------------------
 if not st.session_state.started:
     if st.button("▶️ 開始面試"):
+
         first_reply = call_llm(
             job_role,
             interview_style,
             [],
             resume_info=st.session_state.resume_info,
         )
-        # 顯示第一題
+
         st.session_state.messages.append(("assistant", first_reply))
         st.session_state.last_question = first_reply
         st.session_state.started = True
 
-        # ===== TTS 第一題 =====
+        # ⭐設定旗標，下一輪 render 播放 TTS
         if st.session_state.voice_mode:
-            audio_bytes = synthesize_speech(first_reply)
-            if audio_bytes:
-                st.audio(audio_bytes, format="audio/mp3")
+            st.session_state.play_tts_first_question = True
 
         st.rerun()
+
 
 
 
@@ -380,7 +445,18 @@ else:
 
     if audio_rec:
         with st.spinner("Whisper 正在辨識你的語音…"):
-            voice_answer = speech_to_text(audio_rec)
+            whisper_resp = speech_to_text(audio_rec)
+            voice_answer = whisper_resp["text"]
+
+            # ===== 語音特徵分析 =====
+            analysis = analyze_speech_features(whisper_resp, audio_rec.getvalue())
+
+            st.markdown("### 📊 語音特徵分析")
+            st.write(f"- 語速（WPM）：{analysis['wpm']}")
+            st.write(f"- 停頓比例：{analysis['silence_ratio']}")
+            st.write(f"- 音量穩定度：{analysis['volume_stability']}")
+            st.write(f"- 填充詞比例：{analysis['filler_ratio']}")
+
         if voice_answer:
             st.success("語音辨識成功！")
             st.write("你的語音內容：", voice_answer)
