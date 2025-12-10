@@ -159,3 +159,59 @@ def grade_interview(
 
     result = completion.choices[0].message.content
     return json.loads(result)
+
+
+def generate_suggestions(
+    qas: List[Dict[str, str]],
+    overall_result: Dict[str, Any],
+) -> str:
+    """
+    根據整場面試的 QA 和評分結果，產生個人化建議。
+    """
+    if not qas:
+        return ""
+
+    # 重新利用 _build_grading_prompt 來建立 QA 的文字稿
+    interview_transcript = _build_grading_prompt(qas, job_role="", resume_info=None)
+
+    system_prompt = """
+    你是一位資深的職涯教練和技術導師。請根據以下提供的面試逐字稿、以及 AI 產生的整體評分和總結，為這位候選人提供具體、可執行的改善建議。
+
+    你的建議必須分成以下兩個明確的段落：
+
+    1.  **回答方式建議：**
+        - 針對候選人回答問題的結構、清晰度、是否使用實例等方面提出建議。
+        - 如果候選人回答過於簡短或冗長，請提出改進方法（例如 STAR 原則）。
+        - 指出哪些問題的回答表現得很好，可以繼續保持。
+
+    2.  **背景知識加強建議：**
+        - 根據候選人的回答，找出其知識體系中可能存在的弱點或不熟練的領域。
+        - 提出具體的學習方向或需要複習的技術主題。
+        - 建議要與應徵的職缺高度相關。
+
+    請用鼓勵但專業的語氣，讓候選人覺得建議是有建設性的，而不是在批評。不要重複 AI 評分中的逐字回饋，而是要提供更高層次的、總結性的指導。
+    """.strip()
+
+    user_content = f"""
+    [AI 對整場面試的整體評分與總結]
+    技術能力: {overall_result.get('technical', 'N/A')} / 5
+    溝通表達: {overall_result.get('communication', 'N/A')} / 5
+    回答結構: {overall_result.get('structure', 'N/A')} / 5
+    職缺相關性: {overall_result.get('relevance', 'N/A')} / 5
+    問題解決: {overall_result.get('problem_solving', 'N/A')} / 5
+    個人潛力: {overall_result.get('growth_potential', 'N/A')} / 5
+    總結: {overall_result.get('summary', 'N/A')}
+
+    [面試逐字稿]
+    {interview_transcript}
+    """.strip()
+
+    completion = client.chat.completions.create(
+        model="gpt-4.1-mini",
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content},
+        ],
+    )
+
+    return completion.choices[0].message.content

@@ -9,3 +9,4 @@ PyPDF2
 numpy
 reportlab
 jinja2
+librosa
