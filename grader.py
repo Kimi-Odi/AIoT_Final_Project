@@ -1,161 +1,215 @@
-# grader.py
-import json
-import os
-from typing import List, Dict, Any
+# ================================================================
+# grader.py — AI 虛擬面試官評分模組（含語音特徵調整 + 語音改善建議）
+# ================================================================
 
-from dotenv import load_dotenv
 from openai import OpenAI
+import os
+from dotenv import load_dotenv
 
 load_dotenv()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-
-def _build_grading_prompt(
-    qas: List[Dict[str, str]],
-    job_role: str,
-    resume_info: Dict[str, Any] | None = None,
-) -> str:
+# ================================================================
+# 🔹 語音特徵調整（你之前要的 B 功能）
+# ================================================================
+def speech_feature_adjustment(features):
     """
-    把整場面試的 QA + 履歷摘要整理成一段文字，給 LLM 當評分輸入。
+    將語音特徵映射為 0.6～1.0 評分係數
+    回傳 float，影響 communication 與 structure 分數
     """
-    lines = []
+    if not features:
+        return 1.0  # 沒有語音 → 不調整
 
-    lines.append(f"應徵職缺：{job_role}")
-    lines.append("")
+    wpm = features["wpm"]
+    silence = features["silence_ratio"]
+    stability = features["volume_stability"]
+    filler = features["filler_ratio"]
 
-    if resume_info:
-        skills = ", ".join(resume_info.get("skills", []))
-        proj_lines = []
-        for p in resume_info.get("projects", []):
-            title = p.get("title", "")
-            desc = p.get("description", "")
-            proj_lines.append(f"- {title}: {desc}")
+    # -------------------------
+    # WPM 語速
+    # 理想：100～180
+    # -------------------------
+    if wpm < 80:
+        wpm_score = 0.7
+    elif 80 <= wpm <= 180:
+        wpm_score = 1.0
+    else:
+        wpm_score = 0.8
 
-        summary = resume_info.get("summary", "")
+    # -------------------------
+    # 停頓比例（越少越好）
+    # -------------------------
+    if silence < 0.10:
+        silence_score = 1.0
+    elif silence < 0.25:
+        silence_score = 0.85
+    else:
+        silence_score = 0.65
 
-        lines.append("[履歷摘要]")
-        if skills:
-            lines.append(f"技能：{skills}")
-        if proj_lines:
-            lines.append("專案：")
-            lines.extend(proj_lines)
-        if summary:
-            lines.append(f"履歷總結：{summary}")
-        lines.append("")
+    # -------------------------
+    # 音量穩定度（0~1）
+    # -------------------------
+    stability_score = max(min(stability, 1.0), 0.0)
 
-    lines.append("[面試問答紀錄]")
-    for idx, qa in enumerate(qas, start=1):
-        q = qa.get("question", "")
-        a = qa.get("answer", "")
-        lines.append(f"第 {idx} 題：")
-        lines.append(f"面試官：{q}")
-        lines.append(f"候選人：{a}")
-        lines.append("")
+    # -------------------------
+    # 填充詞（越少越好）
+    # -------------------------
+    if filler < 0.02:
+        filler_score = 1.0
+    elif filler < 0.05:
+        filler_score = 0.8
+    else:
+        filler_score = 0.65
 
-    return "\n".join(lines)
+    final = (wpm_score + silence_score + stability_score + filler_score) / 4
+    return round(final, 3)
 
 
-def grade_interview(
-    qas: List[Dict[str, str]],
-    job_role: str,
-    resume_info: Dict[str, Any] | None = None,
-) -> Dict[str, Any]:
+# ================================================================
+# 🔹 AI 給語音改善建議（你選的 D 功能）
+# ================================================================
+def generate_speech_feedback(features):
+    if not features:
+        return "本次未提供語音回答，因此無法產生語音表達建議。"
+
+    wpm = features["wpm"]
+    silence = features["silence_ratio"]
+    stability = features["volume_stability"]
+    filler = features["filler_ratio"]
+
+    feedback = []
+
+    # 語速
+    if wpm < 100:
+        feedback.append(f"- 語速 {wpm} WPM：偏慢，可多練習口語流暢度。")
+    elif wpm > 180:
+        feedback.append(f"- 語速 {wpm} WPM：偏快，建議放慢讓語句更清晰。")
+    else:
+        feedback.append(f"- 語速 {wpm} WPM：表現良好。")
+
+    # 停頓
+    if silence > 0.25:
+        feedback.append(f"- 停頓比例 {silence}：停頓略多，建議先組織語句再回答。")
+    else:
+        feedback.append(f"- 停頓比例 {silence}：自然、表現正常。")
+
+    # 音量穩定度
+    if stability < 0.6:
+        feedback.append(f"- 音量穩定度 {stability}：音量起伏較大，可練習更穩定的語調。")
+    else:
+        feedback.append(f"- 音量穩定度 {stability}：良好。")
+
+    # 填充詞
+    if filler > 0.05:
+        feedback.append(f"- 填充詞比例 {filler}：'嗯'、'呃' 使用偏多，建議控制口頭禪。")
+    else:
+        feedback.append(f"- 填充詞比例 {filler}：使用正常。")
+
+    feedback.append("\n建議每天錄音練習 5 分鐘，可以明顯改善語音表達。")
+
+    return "\n".join(feedback)
+
+
+# ================================================================
+# 🔹 問題逐題評分（AI）
+# ================================================================
+def grade_single_qa(question, answer, speech_features=None):
     """
-    針對整場面試進行評分，回傳 JSON 結果：
-
-    {
-      "overall": {
-        "technical": 4,
-        "communication": 3,
-        "structure": 4,
-        "relevance": 5,
-        "summary": "..."
-      },
-      "per_question": [
-        {
-          "question": "...",
-          "answer": "...",
-          "score": {
-            "technical": 3,
-            "communication": 4,
-            "structure": 3,
-            "relevance": 4
-          },
-          "feedback": "..."
-        },
-        ...
-      ]
-    }
+    使用 GPT 分析單題回答→ 回傳分數 + 回饋
     """
-    if not qas:
-        return {}
+    prompt = f"""
+你是一位專業面試官，請針對候選人的回答進行逐題評分。
+請依「技術」、「表達」、「結構」、「相關性」、「解題能力」、「成長潛力」六項評分，每項 0~5 分。
 
-    user_content = _build_grading_prompt(qas, job_role, resume_info)
+題目：{question}
+回答：{answer}
 
-    system_prompt = """
-    你是一位專業的技術面試官與面試評分者，請你根據候選人的每一題回答進行嚴謹的評估。
+請回傳 JSON：
+{{
+  "technical": 分數0~5,
+  "communication": 分數0~5,
+  "structure": 分數0~5,
+  "relevance": 分數0~5,
+  "problem_solving": 分數0~5,
+  "growth_potential": 分數0~5,
+  "feedback": "一句話回饋"
+}}
+"""
 
-    請依下列六個面向評分（1~5 分，5 分為最佳）：
-    - technical: 技術正確性與深度
-    - communication: 口語或文字表達清楚程度
-    - structure: 答案結構與條理性（是否有步驟、是否有例子）
-    - relevance: 回答與題目以及履歷內容的相關程度（是否答對題、是否「答非所問」）
-    - problem_solving: 問題分析與解決能力
-    - growth_potential: 學習潛力與發展性
-
-    【答非所問判斷規則】
-    若候選人的回答出現以下情況，relevance 給 1 或 2 分：
-    - 明顯沒有回答題目的核心內容
-    - 回答完全是無關的資訊
-    - 提到的內容與題目毫無邏輯連結
-    - 回答模糊、整段像自我介紹、但題目在問技術細節
-    - 面試官問 A，候選人回答 B（經典「答非所問」）
-
-    請在逐題回饋中明確指出這個問題，例如：
-    -「此回答未能直接回應題目核心，屬於答非所問。」
-    -「內容偏離題目方向，建議更聚焦。」
-
-    【輸出格式很重要】
-    請務必輸出以下 JSON 結構（不要加註解、不加多餘文字）：
-
-    {
-    "overall": {
-        "technical": <1-5>,
-        "communication": <1-5>,
-        "structure": <1-5>,
-        "relevance": <1-5>,
-        "problem_solving": <1-5>,
-        "growth_potential": <1-5>,
-        "summary": "<整體總結>"
-    },
-    "per_question": [
-        {
-        "question": "<題目文字>",
-        "answer": "<回答文字>",
-        "score": {
-            "technical": <1-5>,
-            "communication": <1-5>,
-            "structure": <1-5>,
-            "relevance": <1-5>,
-            "problem_solving": <1-5>,
-            "growth_potential": <1-5>
-        },
-        "feedback": "<1~3 句具體回饋>"
-        }
-    ]
-    }
-    """.strip()
-
-
-
-    completion = client.chat.completions.create(
+    resp = client.chat.completions.create(
         model="gpt-4.1-mini",
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_content},
-        ],
-        response_format={"type": "json_object"},
+        messages=[{"role": "user", "content": prompt}]
     )
 
-    result = completion.choices[0].message.content
-    return json.loads(result)
+    import json
+    data = json.loads(resp.choices[0].message.content)
+
+    # ⭐ 語音特徵調整：communication & structure
+    if speech_features:
+        factor = speech_feature_adjustment(speech_features)
+        data["communication"] = round(data["communication"] * factor, 2)
+        data["structure"] = round(data["structure"] * (0.7 + 0.3 * factor), 2)
+
+    return data
+
+
+# ================================================================
+# 🔹 整場面試評分（整合逐題）
+# ================================================================
+def grade_interview(qa_list, job_role, resume_info=None, speech_features=None):
+
+    per_question_results = []
+
+    # ----------- 逐題分析 -----------
+    for qa in qa_list:
+        score = grade_single_qa(
+            qa["question"], qa["answer"], speech_features=speech_features
+        )
+        per_question_results.append({
+            "question": qa["question"],
+            "answer": qa["answer"],
+            "score": score,
+            "feedback": score["feedback"]
+        })
+
+    # ----------- 整體平均 -----------
+    n = len(per_question_results)
+    overall = {
+        "technical": 0,
+        "communication": 0,
+        "structure": 0,
+        "relevance": 0,
+        "problem_solving": 0,
+        "growth_potential": 0,
+    }
+
+    for item in per_question_results:
+        s = item["score"]
+        for k in overall:
+            overall[k] += s[k]
+
+    for k in overall:
+        overall[k] = round(overall[k] / n, 2)
+
+    # ----------- 整體評論（AI）-----------
+    overall_prompt = f"""
+請根據以下面試分數，生成一段 100 字以內的整體評論（繁體中文）。
+
+職缺：{job_role}
+逐題平均分數如下：
+{overall}
+
+請給出總結，不要列點。
+"""
+
+    resp = client.chat.completions.create(
+        model="gpt-4.1-mini",
+        messages=[{"role": "user", "content": overall_prompt}]
+    )
+    overall_summary = resp.choices[0].message.content.strip()
+    overall["summary"] = overall_summary
+
+    return {
+        "overall": overall,
+        "per_question": per_question_results
+    }
